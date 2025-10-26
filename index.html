@@ -146,23 +146,55 @@
     toggleMapBtn.addEventListener('click', showMapOnly);
     toggleArBtn.addEventListener('click', startAR);
 
+    // iOS向け：モーションアクセス許可
+    async function requestIOSMotion(){
+      try {
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+          const res = await DeviceOrientationEvent.requestPermission();
+          logDiag('DeviceOrientation permission: ' + res);
+        }
+      } catch(e){ logDiag('DeviceOrientation request error: ' + (e.message||e)); }
+    }
+
     function showMapOnly(){ mapWrap.style.display = 'block'; arContainer.innerHTML = ''; }
 
     async function startAR(){
       if (!isSecure) { alert('HTTPSで開いてください。'); return; }
       if (isInApp) { alert('アプリ内ブラウザでは動作しない可能性があります。Safari/Chromeで開いてください。'); }
+
+      // 事前にモーション許可（iOS）とカメラ可否の軽いチェック
+      await requestIOSMotion();
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+        alert('このブラウザはカメラAPIに対応していません。最新版のSafari/Chromeをご利用ください。');
+        return;
+      }
+      try {
+        const tmp = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+        tmp.getTracks().forEach(t=>t.stop());
+      } catch(e){
+        alert('カメラへのアクセスが許可されていません。設定から許可してください。(' + (e.name||'') + ')');
+        logDiag('getUserMedia error: ' + (e.name||e.message||e));
+        return;
+      }
+
       if (!arReady) {
-        const ok = await loadARLibs(); // ← ★ 遅延ロード（A-Frame/AR.js）
+        const ok = await loadARLibs();
         if (!ok) { alert('AR用ライブラリの読み込みに失敗しました。地図のみでご利用ください。'); return; }
-        createARScene();
-        arReady = true;
+        try {
+          createARScene();
+          arReady = true;
+        } catch(e){
+          logDiag('createARScene error: ' + (e.message||e));
+          alert('AR初期化に失敗しました。地図のみでご利用ください。');
+          return;
+        }
       }
       mapWrap.style.display = 'none';
     }
 
     // ====== ライブラリ遅延ロード ======
     function loadScript(src){
-      return new Promise((resolve)=>{ const s=document.createElement('script'); s.src=src; s.async=true; s.onload=()=>resolve(true); s.onerror=()=>resolve(false); document.head.appendChild(s); });
+      return new Promise((resolve)=>{ const s=document.createElement('script'); s.src=src; s.async=true; s.crossOrigin='anonymous'; s.onload=()=>resolve(true); s.onerror=()=>resolve(false); document.head.appendChild(s); });
     }
     function loadCss(href){ const l=document.createElement('link'); l.rel='stylesheet'; l.href=href; document.head.appendChild(l); }
 
@@ -198,7 +230,7 @@
       scene.setAttribute('embedded','');
       scene.setAttribute('vr-mode-ui','enabled: false');
       scene.setAttribute('renderer','antialias: true; alpha: true');
-      scene.setAttribute('arjs','sourceType: webcam; videoTexture: true; debugUIEnabled: false;');
+      scene.setAttribute('arjs','sourceType: camera; facingMode: environment; videoTexture: true; debugUIEnabled: false;');
       const cam = document.createElement('a-camera');
       cam.setAttribute('gps-camera','');
       cam.setAttribute('rotation-reader','');
