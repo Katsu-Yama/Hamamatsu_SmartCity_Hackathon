@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>避難トレーニングGO!（家康くん＆直虎ちゃん・AR試作・修正版5）</title>
+
+  <!-- 安定版ライブラリ -->
+  <script src="https://aframe.io/releases/1.2.0/aframe.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.5/aframe/build/aframe-ar.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/aframe-look-at-component@0.8.0/dist/aframe-look-at-component.min.js" crossorigin="anonymous"></script>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+    #ui { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 9999; display: grid; gap: 8px; }
+    .card { background: rgba(0,0,0,0.55); color: #fff; padding: 10px 12px; border-radius: 12px; backdrop-filter: blur(6px); }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+    .btn { background:#21a366; color:#fff; border:none; padding:8px 12px; border-radius:10px; font-weight:600; cursor:pointer; }
+    .btn.secondary { background:#444; }
+    .btn.warn { background:#c2352b; }
+    .btn.gray { background:#666; }
+    .field { display:flex; gap:6px; align-items:center; flex-wrap: wrap; }
+    .field input { flex: 1 1 120px; min-width: 80px; padding:6px 8px; border-radius:8px; border:1px solid #666; background:#111; color:#fff; }
+    #mapWrap { position: fixed; inset: 0; display:none; }
+    #map { width:100%; height:100%; }
+    .bubble { position: fixed; bottom: 16px; left: 8px; right: 8px; background: rgba(0,0,0,0.65); color:#fff; padding:10px 12px; border-radius:12px; z-index:9999; }
+    .chip { display:inline-block; background:#ffbf00; color:#111; padding:2px 8px; border-radius:999px; font-weight:700; margin-right:8px; }
+    a { color:#7fd0ff; }
+    .diag { position: fixed; top: 8px; right: 8px; z-index: 10000; font-size: 12px; background: rgba(255,255,255,0.9); color:#111; padding: 6px 8px; border-radius: 8px; max-width: 60ch; white-space: pre-wrap; }
+    @media (prefers-color-scheme: dark){ .diag{ background: rgba(0,0,0,0.7); color:#fff; } }
+  </style>
+</head>
+<body>
+  <div id="diag" class="diag">診断: 初期化中…</div>
+
+  <div id="ui">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <div style="font-weight:700;">🏃‍♂️ 避難トレーニングGO!（試作・修正版5）</div>
+        <div class="row">
+          <button class="btn" id="toggleAr">AR開始</button>
+          <button class="btn secondary" id="toggleMap">地図</button>
+        </div>
+      </div>
+      <div class="row field">
+        <span>現在地：</span>
+        <input id="lat" placeholder="緯度" />
+        <input id="lon" placeholder="経度" />
+      </div>
+      <div class="row field">
+        <span>避難所：</span>
+        <input id="shelterName" placeholder="名称" value="浜松市役所（例）" />
+        <input id="shelterLat" placeholder="緯度" value="34.710" />
+        <input id="shelterLon" placeholder="経度" value="137.727" />
+      </div>
+      <div class="row field">
+        <span>ORS API Key：</span>
+        <input id="orsKey" placeholder="OpenRouteService APIキー" />
+        <button class="btn" id="planBtn">経路作成（ORS）</button>
+        <button class="btn warn" id="planOsrmBtn" title="バックアップ">経路作成（OSRM歩行/予備）</button>
+        <button class="btn secondary" id="demoBtn" title="ネット不要の描画テスト">デモ経路</button>
+      </div>
+      <div class="row" style="align-items:center; gap:8px;">
+        <div id="status" style="font-size:14px; opacity:0.9;">📡 位置取得待機中…</div>
+        <button class="btn gray" id="manualBtn" title="位置取得を待たずに手入力を使う">手入力で開始</button>
+        <button class="btn secondary" id="mapOnlyBtn" title="ARを使わず地図のみで使う（推奨）">地図のみで使う</button>
+      </div>
+      <div id="inappWarn" style="display:none; margin-top:8px; font-size:12px; opacity:0.9;">
+        ⚠️ アプリ内ブラウザ/メール内ビューではカメラ・センサー・位置情報がブロックされる場合があります。
+        外部ブラウザ（Safari/Chrome）で開いてください。HTTPS配信が必須です。
+      </div>
+    </div>
+  </div>
+
+  <div class="bubble" id="bubble">👋 <span id="charName">家康くん</span>：安全に気をつけて進もう！<br/>※ 実運用では公式画像・利用許諾が必要です。今はプレースホルダー画像を使用しています。</div>
+
+  <!-- ARコンテナ（ユーザ操作で動的生成） -->
+  <div id="arContainer"></div>
+
+  <!-- Map -->
+  <div id="mapWrap"><div id="map"></div></div>
+
+  <script>
+    // rotation-reader の最小登録
+    if (window.AFRAME) {
+      AFRAME.registerComponent('rotation-reader', { tick: function(){ const _ = this.el && this.el.object3D && this.el.object3D.rotation; } });
+    }
+  </script>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      const diag = document.getElementById('diag');
+      function logDiag(msg){ diag.textContent = `診断: ${msg}`; }
+
+      // 環境診断
+      const isSecure = location.protocol === 'https:' || location.hostname === 'localhost';
+      const ua = navigator.userAgent || '';
+      const isInApp = /(Line|FBAN|FBAV|Instagram|GSA|Gmail|Twitter|wv|WebView)/i.test(ua);
+      if (!isSecure) {
+        logDiag('非HTTPS環境です。位置情報/カメラは動作しない可能性があります。');
+      }
+      if (isInApp) {
+        document.getElementById('inappWarn').style.display = 'block';
+        logDiag('アプリ内ブラウザの可能性。外部ブラウザで開くことを推奨。');
+      }
+
+      // ライブラリ読み込みチェック（失敗時は地図モードに切替）
+      try {
+        if (!window.AFRAME) throw new Error('A-Frame が読み込まれていません');
+        if (!window.THREE) throw new Error('three.js が見つかりません');
+        if (!AFRAME.components['look-at']) throw new Error('look-at コンポーネント未読込');
+        logDiag('ライブラリOK / 準備完了');
+      } catch (e) {
+        logDiag(e.message + '。地図モードでご利用ください。');
+        showMapOnly();
+      }
+
+      window.addEventListener('error', (ev)=>{
+        const m = `エラー: ${ev.message || '不明'} @${ev.filename || 'n/a'}:${ev.lineno || 0}`;
+        logDiag(m);
+        const st = document.getElementById('status');
+        if (st) st.textContent = '⚠️ スクリプトエラー。外部ブラウザ/HTTPSでの再実行を推奨。';
+      });
+
+      // 参照
+      const latEl = document.getElementById('lat');
+      const lonEl = document.getElementById('lon');
+      const orsKeyEl = document.getElementById('orsKey');
+      const planBtn = document.getElementById('planBtn');
+      const planOsrmBtn = document.getElementById('planOsrmBtn');
+      const demoBtn = document.getElementById('demoBtn');
+      const manualBtn = document.getElementById('manualBtn');
+      const mapOnlyBtn = document.getElementById('mapOnlyBtn');
+      const statusEl = document.getElementById('status');
+      const bubbleEl = document.getElementById('bubble');
+      const charNameEl = document.getElementById('charName');
+      const toggleArBtn = document.getElementById('toggleAr');
+      const toggleMapBtn = document.getElementById('toggleMap');
+      const mapWrap = document.getElementById('mapWrap');
+      const arContainer = document.getElementById('arContainer');
+
+      let map, routeLayer, markersLayer;
+      let routeCoords = [];
+      let manualMode = false;
+      const wpEveryMeters = 100; // 100m
+      let arReady = false;
+
+      // PCでは地図既定
+      if (!/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+        showMapOnly();
+      }
+
+      // Geo + ウォッチドッグ
+      let geoResponded = false;
+      setTimeout(()=>{ if (!geoResponded && !manualMode) { manualMode = true; statusEl.textContent = '🖊️ 手入力の現在地を使用してください（位置取得スキップ）'; } }, 3000);
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition((pos) => {
+          if (manualMode) return; geoResponded = true;
+          latEl.value = pos.coords.latitude.toFixed(6);
+          lonEl.value = pos.coords.longitude.toFixed(6);
+          statusEl.innerText = `📍 現在地: ${latEl.value}, ${lonEl.value}`;
+        }, (err) => {
+          geoResponded = true; if (!manualMode) statusEl.innerText = `⚠️ 位置取得失敗: ${err.message}`;
+        }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 });
+        navigator.geolocation.watchPosition((pos) => {
+          if (!manualMode) {
+            const nearest = nearestWaypoint(pos.coords.latitude, pos.coords.longitude);
+            if (nearest) {
+              const { name, dist } = nearest; charNameEl.textContent = name;
+              bubbleEl.innerHTML = `👋 <span class="chip">${name}</span> 残り ${Math.round(dist)}m。交差点では周囲を確認！`;
+            }
+          }
+        });
+      }
+
+      manualBtn.addEventListener('click', ()=>{ manualMode = true; const la = parseFloat(latEl.value)||34.705; const lo = parseFloat(lonEl.value)||137.730; statusEl.textContent = `🖊️ 手入力の現在地を使用中: ${la.toFixed(6)}, ${lo.toFixed(6)}`; });
+      mapOnlyBtn.addEventListener('click', showMapOnly);
+
+      function showMapOnly(){ mapWrap.style.display = 'block'; arContainer.innerHTML = ''; }
+
+      // AR開始（動的生成：ユーザ操作後にカメラ/センサー要求）
+      toggleArBtn.addEventListener('click', async ()=>{
+        if (!isSecure) { alert('HTTPSで開いてください。カメラ/位置情報は非HTTPSでは動きません。'); return; }
+        if (isInApp) { alert('アプリ内ブラウザでは動作しない可能性があります。Safari/Chromeで開いてください。'); }
+        if (!arReady) {
+          createARScene();
+          arReady = true;
+        }
+        mapWrap.style.display = 'none';
+      });
+
+      function createARScene(){
+        arContainer.innerHTML = '';
+        const scene = document.createElement('a-scene');
+        scene.setAttribute('embedded','');
+        scene.setAttribute('vr-mode-ui','enabled: false');
+        scene.setAttribute('renderer','antialias: true; alpha: true');
+        scene.setAttribute('arjs','sourceType: webcam; videoTexture: true; debugUIEnabled: false;');
+        const cam = document.createElement('a-camera');
+        cam.setAttribute('gps-camera','');
+        cam.setAttribute('rotation-reader','');
+        const wps = document.createElement('a-entity');
+        wps.id = 'waypoints';
+        scene.appendChild(cam);
+        scene.appendChild(wps);
+        arContainer.appendChild(scene);
+      }
+
+      // ルーティング・UIは前版同様
+      document.getElementById('toggleMap').addEventListener('click', ()=>{ showMapOnly(); });
+      planBtn.addEventListener('click', async () => {
+        const key = orsKeyEl.value.trim();
+        const lat = parseFloat(latEl.value), lon = parseFloat(lonEl.value);
+        const shelLat = parseFloat(document.getElementById('shelterLat').value);
+        const shelLon = parseFloat(document.getElementById('shelterLon').value);
+        const shelterName = document.getElementById('shelterName').value.trim();
+        if (!key || !isValidLatLon(lat,lon) || !isValidLatLon(shelLat,shelLon)) { alert('入力（APIキー／座標）を確認してください。'); return; }
+        manualMode = true; statusEl.innerText = '🧭 ORS で徒歩ルート作成中…';
+        try {
+          const resp = await planWithORS({key, start:{lat,lon}, goal:{lat:shelLat,lon:shelLon}});
+          if (!resp.ok) throw new Error(resp.msg || 'ORS エラー');
+          applyRoute(resp.coords, shelterName);
+          statusEl.innerText = `✅ ORS ルート取得: ${(resp.distance_km).toFixed(2)} km`;
+        } catch (e) {
+          statusEl.innerText = '⚠️ ORS 失敗。OSRM(予備)も試せます。';
+          logDiag('ORS 取得エラー詳細: ' + (e.message || e.toString()));
+        }
+      });
+
+      planOsrmBtn.addEventListener('click', async () => {
+        const lat = parseFloat(latEl.value), lon = parseFloat(lonEl.value);
+        const shelLat = parseFloat(document.getElementById('shelterLat').value);
+        const shelLon = parseFloat(document.getElementById('shelterLon').value);
+        const shelterName = document.getElementById('shelterName').value.trim();
+        if (!isValidLatLon(lat,lon) || !isValidLatLon(shelLat,shelLon)) { alert('座標を確認してください。'); return; }
+        manualMode = true; statusEl.innerText = '🧭 OSRM(歩行) でルート作成中…';
+        try {
+          const resp = await planWithOSRM({start:{lat,lon}, goal:{lat:shelLat,lon:shelLon}});
+          if (!resp.ok) throw new Error(resp.msg || 'OSRM エラー');
+          applyRoute(resp.coords, shelterName);
+          statusEl.innerText = `✅ OSRM ルート取得: ${(resp.distance_km).toFixed(2)} km`;
+        } catch (e) {
+          statusEl.innerText = '⚠️ OSRM も失敗しました。ネットワークをご確認ください。';
+          logDiag('OSRM 取得エラー詳細: ' + (e.message || e.toString()));
+        }
+      });
+
+      demoBtn.addEventListener('click', () => {
+        const la = parseFloat(latEl.value); const lo = parseFloat(lonEl.value);
+        const lat = isValidLatLon(la,lo) ? la : 34.707; const lon = isValidLatLon(la,lo) ? lo : 137.734;
+        manualMode = true; const goal = {lat: lat + 0.004, lon: lon - 0.006}; const demo = [ {lat,lon}, {lat: lat+0.002, lon: lon-0.003}, goal ];
+        applyRoute(demo, 'デモ避難所'); statusEl.innerText = '✅ デモ経路を描画しました（API不要）';
+      });
+
+      async function planWithORS({key,start,goal}){
+        try {
+          const base = 'https://api.openrouteservice.org/v2/directions/foot-walking';
+          const url  = `${base}?format=geojson&instructions=false&api_key=${encodeURIComponent(key)}`;
+          const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ coordinates: [[start.lon, start.lat], [goal.lon, goal.lat]] }) });
+          const text = await res.text(); let json = {}; try { json = JSON.parse(text); } catch(_){ }
+          if (!res.ok) { const msg = json && json.error && json.error.message ? json.error.message : `HTTP ${res.status} ${res.statusText}`; return { ok:false, msg: msg + ' / body: ' + text.slice(0,200) }; }
+          if (json.features && json.features[0]) {
+            const feat = json.features[0]; const coords = feat.geometry.coordinates.map(([x,y])=>({lat:y, lon:x}));
+            const dist_km = (feat.properties && feat.properties.summary && feat.properties.summary.distance) ? feat.properties.summary.distance/1000 : NaN;
+            return { ok:true, coords, distance_km: dist_km, via:'geojson' };
+          }
+          if (json.routes && json.routes[0]) {
+            const r = json.routes[0];
+            if (r.geometry && r.geometry.type === 'LineString' && Array.isArray(r.geometry.coordinates)) {
+              const coords = r.geometry.coordinates.map(([x,y])=>({lat:y, lon:x})); const dist_km = r.summary && isFinite(r.summary.distance) ? r.summary.distance/1000 : (r.distance? r.distance/1000 : NaN);
+              return { ok:true, coords, distance_km: dist_km, via:'routes-geojson' };
+            }
+            if (r.geometry && typeof r.geometry === 'string') {
+              const decoded = decodePolyline(r.geometry); if (decoded && decoded.length) {
+                const dist_km = r.summary && isFinite(r.summary.distance) ? r.summary.distance/1000 : (r.distance? r.distance/1000 : NaN);
+                return { ok:true, coords: decoded, distance_km: dist_km, via:'routes-encoded' };
+              }
+            }
+          }
+          return { ok:false, msg: 'ORS 応答が不完全です / body: ' + text.slice(0,200) };
+        } catch(e){ return { ok:false, msg: e.message || String(e) }; }
+      }
+
+      async function planWithOSRM({start,goal}){
+        try {
+          const base = 'https://router.project-osrm.org/route/v1/foot/'; const url = `${base}${start.lon},${start.lat};${goal.lon},${goal.lat}?overview=full&geometries=geojson`;
+          const res = await fetch(url); const text = await res.text(); let json = {}; try { json = JSON.parse(text); } catch(_){ }
+          if (!res.ok || json.code !== 'Ok' || !json.routes || !json.routes[0]) { return { ok:false, msg: `OSRM 応答不正 / code=${json.code} / body: ${text.slice(0,200)}` }; }
+          const route = json.routes[0]; const coords = route.geometry.coordinates.map(([x,y])=>({lat:y, lon:x}));
+          return { ok:true, coords, distance_km: route.distance/1000 };
+        } catch(e){ return { ok:false, msg: e.message || String(e) }; }
+      }
+
+      function decodePolyline(str, precision=1e-5){ if (!str || typeof str !== 'string') return null; let index = 0, lat = 0, lon = 0, coords = []; const len = str.length; while (index < len) { let b, shift = 0, result = 0; do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20); const dlat = ((result & 1) ? ~(result >> 1) : (result >> 1)); lat += dlat; shift = 0; result = 0; do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20); const dlon = ((result & 1) ? ~(result >> 1) : (result >> 1)); lon += dlon; coords.push({ lat: lat * precision, lon: lon * precision }); } return coords; }
+
+      function applyRoute(coords, shelterName){ routeCoords = coords; placeWaypoints(coords, shelterName); renderMap(coords, {lat: coords[coords.length-1].lat, lon: coords[coords.length-1].lon, name: shelterName}); }
+      function isValidLatLon(lat,lon){ return isFinite(lat) && isFinite(lon) && Math.abs(lat)<=90 && Math.abs(lon)<=180; }
+
+      function placeWaypoints(coords, shelterName){ const container = document.getElementById('waypoints') || document.getElementById('arContainer').querySelector('#waypoints'); if (!container) return; container.innerHTML = ''; if (!coords || !coords.length) return; const sampled = sampleByDistance(coords, wpEveryMeters); sampled.push(coords[coords.length-1]); sampled.forEach((p,i)=>{ const who = [{ name: '家康くん', img: 'https://cdn-icons-png.flaticon.com/512/616/616408.png' },{ name: '直虎ちゃん', img: 'https://cdn-icons-png.flaticon.com/512/616/616430.png' }][i % 2]; const e = document.createElement('a-image'); e.setAttribute('src', who.img); e.setAttribute('look-at', '[gps-camera]'); e.setAttribute('gps-entity-place', `latitude: ${p.lat}; longitude: ${p.lon};`); e.setAttribute('scale', '8 8 8'); e.setAttribute('opacity', '0.95'); e.setAttribute('title', who.name); e.addEventListener('loaded', () => window.dispatchEvent(new CustomEvent('gps-entity-place-loaded'))); e.addEventListener('click', () => { document.getElementById('charName').textContent = who.name; document.getElementById('bubble').innerHTML = `🎉 <span class="chip">${who.name}</span> よく見つけた！次のポイントへ進もう。`; }); container.appendChild(e); }); const goal = document.createElement('a-image'); goal.setAttribute('src', 'https://cdn-icons-png.flaticon.com/512/190/190411.png'); const last = coords[coords.length-1]; goal.setAttribute('gps-entity-place', `latitude: ${last.lat}; longitude: ${last.lon};`); goal.setAttribute('scale', '10 10 10'); goal.addEventListener('click', () => { document.getElementById('bubble').innerHTML = `✅ 避難所「${shelterName}」に到着！ 今日のトレーニング完了。`; }); container.appendChild(goal); }
+
+      function toRad(d){ return d*Math.PI/180; }
+      function haversine(a,b){ const R=6371000; const dLat=toRad(b.lat-a.lat), dLon=toRad(b.lon-a.lon); const s1=Math.sin(dLat/2), s2=Math.sin(dLon/2); const c=2*Math.asin(Math.sqrt(s1*s1+Math.cos(toRad(a.lat))*Math.cos(toRad(b.lat))*s2*s2)); return R*c; }
+      function sampleByDistance(coords, step){ const out=[coords[0]]; let acc=0; for(let i=1;i<coords.length;i++){ const d=haversine(coords[i-1], coords[i]); acc+=d; if(acc>=step){ out.push(coords[i]); acc=0; } } return out; }
+      function nearestWaypoint(lat, lon){ const cam={lat, lon}; const els=[...document.querySelectorAll('#waypoints a-image')]; if(!els || !els.length) return null; let best=null; els.forEach(el=>{ if(!el) return; const attr = el.getAttribute('gps-entity-place'); if(!attr) return; const m = /latitude:\s*([\d\.-]+);\s*longitude:\s*([\d\.-]+)/.exec(attr); if(!m) return; const p={lat: parseFloat(m[1]), lon: parseFloat(m[2])}; const dist = haversine(cam, p); const name = el.getAttribute('title') || 'チェックポイント'; if(!best || dist<best.dist) best={name, dist}; }); return best; }
+
+      function renderMap(coords, shelter){ if(!map){ map = L.map('map'); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map); routeLayer = L.polyline([], {color:'green', weight:5}).addTo(map); markersLayer = L.layerGroup().addTo(map); } const latlngs = coords.map(p=>[p.lat, p.lon]); routeLayer.setLatLngs(latlngs); markersLayer.clearLayers(); L.marker(latlngs[0], {title:'出発'}).addTo(markersLayer).bindPopup('出発地点'); L.marker(latlngs[latlngs.length-1], {title:'避難所'}).addTo(markersLayer).bindPopup(`避難所：${shelter.name}`); const sampled = sampleByDistance(coords, wpEveryMeters); sampled.forEach((p,i)=>{ const who = i % 2 === 0 ? '家康くん' : '直虎ちゃん'; L.marker([p.lat,p.lon]).addTo(markersLayer).bindPopup(`${who} ポイント`); }); map.fitBounds(routeLayer.getBounds(), {padding:[40,40]}); }
+    });
+  </script>
+
+  <div style="position:fixed; bottom:0; right:0; padding:6px 10px; font-size:12px; opacity:0.85; background:#fff; border-top-left-radius:10px;">🚦 歩きスマホ・道路横断時の使用禁止 / 立ち止まって操作してください</div>
+</body>
+</html>
