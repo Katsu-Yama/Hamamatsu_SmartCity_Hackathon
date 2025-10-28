@@ -16,7 +16,7 @@ from folium.plugins import LocateControl
 # 設定（既定ファイル名）
 # =========================
 DEFAULT_MOBILITY_CSV = "年齢層別移動能力.csv"
-DEFAULT_SHELTER_CSV  = "避難所リスト.csv"  # ← デモ用に “test” を既定に
+DEFAULT_SHELTER_CSV  = "避難所リスト.csv" 
 
 # =========================
 # ユーティリティ
@@ -339,4 +339,5 @@ with st.expander("補足：到達圏の見方"):
 - 同心円は選択した **年齢区分 × 活動種別** の行から、**5/10/15分で移動できる距離（km）** を読み取り半径にしています。
 - 厳密な等時間到達圏（Isochrone）が必要なら、OpenRouteService等の等時間APIへの切替も可能です。
 """)
+
 
