@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import io
 import math
+import os
 import typing as T
 from dataclasses import dataclass
 
@@ -10,6 +11,12 @@ import streamlit as st
 from streamlit_folium import st_folium
 import folium
 from folium.plugins import LocateControl
+
+# =========================
+# 設定（既定ファイル名）
+# =========================
+DEFAULT_MOBILITY_CSV = "年齢層別移動能力.csv"
+DEFAULT_SHELTER_CSV  = "避難所リストtest.csv"  # ← デモ用に “test” を既定に
 
 # =========================
 # ユーティリティ
@@ -66,11 +73,18 @@ class Shelter:
     lat: float
     lon: float
 
-def load_mobility_csv(file: io.BytesIO) -> pd.DataFrame:
-    return pd.read_csv(file)
-
-def load_shelter_csv(file: io.BytesIO) -> pd.DataFrame:
-    return pd.read_csv(file)
+@st.cache_data(show_spinner=False)
+def load_csv(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSVが見つかりません: {path}")
+    # エンコーディング自動化（日本語CSV想定のフォールバック付き）
+    for enc in ["utf-8-sig", "utf-8", "cp932"]:
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except Exception:
+            continue
+    # 最後にデフォルトで再挑戦（例外をそのまま投げる）
+    return pd.read_csv(path)
 
 def extract_timeband_distances(df: pd.DataFrame, age_col: str, act_col: str,
                                col_5: str, col_10: str, col_15: str,
@@ -126,77 +140,79 @@ def osrm_route_foot(start_lat, start_lon, end_lat, end_lon) -> dict | None:
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="避難ルート・到達圏デモ", layout="wide")
-st.title("避難ルート・到達圏デモ（PCブラウザ用）")
+st.set_page_config(page_title="避難ルート・到達圏デモ（固定CSV）", layout="wide")
+st.title("避難ルート・到達圏デモ（固定CSV自動読込）")
 
 with st.sidebar:
-    st.header("1) 年齢層別 移動能力CSV")
-    st.caption("列例：『年齢区分 / 活動種別(=活動種類) / 5分(km) / 10分(km) / 15分(km)』")
-    mob_file = st.file_uploader("年齢層別移動能力.csv をアップロード", type=["csv"])
-    st.divider()
-
-    st.header("2) 避難所リストCSV")
-    st.caption("必須：『避難所名 / 緯度 / 経度』、任意：『住所』")
-    shelter_file = st.file_uploader("避難所リスト.csv をアップロード", type=["csv"])
+    st.header("ファイル設定（必要なら変更）")
+    mobility_path = st.text_input("年齢層別移動能力 CSV パス", value=DEFAULT_MOBILITY_CSV)
+    shelter_path  = st.text_input("避難所リスト CSV パス", value=DEFAULT_SHELTER_CSV)
+    st.caption("※ リポジトリ直下に配置するのが簡単です。相対/絶対パスいずれも可。")
 
     st.divider()
-    st.header("3) 現在地（手動設定・任意）")
+    st.header("現在地（任意で手動設定）")
     default_lat = st.number_input("現在地 緯度（未入力なら地図の📍で取得）", value=35.681236, step=0.000001, format="%.6f")
     default_lon = st.number_input("現在地 経度（未入力なら地図の📍で取得）", value=139.767125, step=0.000001, format="%.6f")
     st.caption("※ 左上の📍ボタン（位置情報の許可が必要）でブラウザの現在地を取得できます。")
 
-# 年齢・活動の選択UI（5/10/15分の距離kmを取得）
-age_selected = None
-act_selected = None
-dist5_km = dist10_km = dist15_km = None
+# ---- CSV 自動読込（年齢層別移動能力）
 mob_df = None
+dist5_km = dist10_km = dist15_km = None
+age_selected = act_selected = None
+try:
+    mob_df = load_csv(mobility_path)
+    colmap = detect_columns(mob_df, {
+        "age":    ["年齢区分","年齢層","年齢","age"],
+        "activity": ["活動種別","活動種類","活動","アクティビティ","activity"],
+        "m5":     ["5分(km)","5分","5min(km)","5min"],
+        "m10":    ["10分(km)","10分","10min(km)","10min"],
+        "m15":    ["15分(km)","15分","15min(km)","15min"],
+    })
+    required = ["age","activity","m5","m10","m15"]
+    if not all(k in colmap for k in required):
+        st.error("年齢層別移動能力CSVの列名が認識できません。必要列：年齢区分 / 活動種別(活動種類) / 5分(km) / 10分(km) / 15分(km)")
+    else:
+        age_col = colmap["age"]
+        act_col = colmap["activity"]
+        col_5   = colmap["m5"]
+        col_10  = colmap["m10"]
+        col_15  = colmap["m15"]
 
-if mob_file:
-    try:
-        mob_df = load_mobility_csv(mob_file)
-        colmap = detect_columns(mob_df, {
-            "age":    ["年齢区分","年齢層","年齢","age"],
-            "activity": ["活動種別","活動種類","活動","アクティビティ","activity"],
-            "m5":     ["5分(km)","5分","5min(km)","5min"],
-            "m10":    ["10分(km)","10分","10min(km)","10min"],
-            "m15":    ["15分(km)","15分","15min(km)","15min"],
-        })
-        required = ["age","activity","m5","m10","m15"]
-        if not all(k in colmap for k in required):
-            st.warning("列名の自動判別に失敗しました。必要列：年齢区分 / 活動種別(活動種類) / 5分(km) / 10分(km) / 15分(km)")
-        else:
-            age_col = colmap["age"]
-            act_col = colmap["activity"]
-            col_5   = colmap["m5"]
-            col_10  = colmap["m10"]
-            col_15  = colmap["m15"]
+        ages = list(pd.unique(mob_df[age_col].astype(str)))
+        acts = list(pd.unique(mob_df[act_col].astype(str)))
+        c1, c2 = st.columns(2)
+        with c1:
+            age_selected = st.selectbox("年齢区分", ages, index=0 if ages else None)
+        with c2:
+            act_selected = st.selectbox("活動種別（活動種類）", acts, index=0 if acts else None)
 
-            ages = list(pd.unique(mob_df[age_col].astype(str)))
-            acts = list(pd.unique(mob_df[act_col].astype(str)))
-            c1, c2 = st.columns(2)
-            with c1:
-                age_selected = st.selectbox("年齢区分", ages, index=0 if ages else None)
-            with c2:
-                act_selected = st.selectbox("活動種別（活動種類）", acts, index=0 if acts else None)
+        if age_selected and act_selected:
+            dist5_km, dist10_km, dist15_km = extract_timeband_distances(
+                mob_df, age_col, act_col, col_5, col_10, col_15, age_selected, act_selected
+            )
+            if None in (dist5_km, dist10_km, dist15_km):
+                st.warning("選択の組み合わせの5/10/15分距離が見つかりません。")
+            else:
+                st.success(f"到達距離（{age_selected} × {act_selected}）："
+                           f"5分={dist5_km:.2f} km, 10分={dist10_km:.2f} km, 15分={dist15_km:.2f} km")
+except Exception as e:
+    st.error(f"年齢層別移動能力CSVの読み込みエラー: {e}")
 
-            if age_selected and act_selected:
-                dist5_km, dist10_km, dist15_km = extract_timeband_distances(
-                    mob_df, age_col, act_col, col_5, col_10, col_15, age_selected, act_selected
-                )
-                if None in (dist5_km, dist10_km, dist15_km):
-                    st.info("選択の組み合わせの5/10/15分距離が見つかりません。")
-                else:
-                    st.success(f"到達距離（{age_selected} × {act_selected}）："
-                               f"5分={dist5_km:.2f} km, 10分={dist10_km:.2f} km, 15分={dist15_km:.2f} km")
-    except Exception as e:
-        st.error(f"年齢層別移動能力CSVの読み込みでエラー: {e}")
+# ---- CSV 自動読込（避難所）
+shelters: T.List[Shelter] = []
+try:
+    sh_df = load_csv(shelter_path)
+    shelters = parse_shelters(sh_df)
+    st.success(f"避難所リストを読み込みました：{len(shelters)} 件")
+except Exception as e:
+    st.error(f"避難所リストCSVの読み込みエラー: {e}")
 
 # 地図の作成
 st.subheader("地図（現在地の📍ボタンで位置取得 → 同心円と避難所を確認）")
 m = folium.Map(location=[default_lat, default_lon], zoom_start=12, control_scale=True)
 LocateControl(auto_start=False, position="topleft").add_to(m)
 
-# 同心円を描く（km→m変換）。CSV未選択時は表示しない。
+# 同心円描画（CSVが有効な場合のみ）
 def add_timeband_circles(lat, lon, d5_km, d10_km, d15_km):
     circle_defs = [
         (d5_km  * 1000.0,  "#2ecc71", f"5分 到達距離 {d5_km:.2f} km"),   # 緑
@@ -214,27 +230,18 @@ def add_timeband_circles(lat, lon, d5_km, d10_km, d15_km):
             tooltip=label
         ).add_to(m)
 
-# CSVが選択され、距離が揃っている場合のみ初期描画
 if all(v is not None for v in (dist5_km, dist10_km, dist15_km)):
     add_timeband_circles(default_lat, default_lon, dist5_km, dist10_km, dist15_km)
 
-# 避難所の描画
-shelters: T.List[Shelter] = []
-if shelter_file:
-    try:
-        sh_df = load_shelter_csv(shelter_file)
-        shelters = parse_shelters(sh_df)
-        for s in shelters:
-            popup = folium.Popup(f"<b>{s.name}</b><br/>{s.address or ''}", max_width=250)
-            folium.Marker(
-                location=[s.lat, s.lon],
-                popup=popup,
-                tooltip=s.name,
-                icon=folium.Icon(color="blue", icon="info-sign")
-            ).add_to(m)
-        st.success(f"避難所を {len(shelters)} 件プロットしました。")
-    except Exception as e:
-        st.error(f"避難所CSVの読み込みでエラー: {e}")
+# 避難所マーカー
+for s in shelters:
+    popup = folium.Popup(f"<b>{s.name}</b><br/>{s.address or ''}", max_width=250)
+    folium.Marker(
+        location=[s.lat, s.lon],
+        popup=popup,
+        tooltip=s.name,
+        icon=folium.Icon(color="blue", icon="info-sign")
+    ).add_to(m)
 
 map_state = st_folium(m, height=600, width=None, returned_objects=["center"])
 
@@ -242,6 +249,20 @@ map_state = st_folium(m, height=600, width=None, returned_objects=["center"])
 current_lat = map_state["center"]["lat"] if map_state and map_state.get("center") else default_lat
 current_lon = map_state["center"]["lng"] if map_state and map_state.get("center") else default_lon
 st.info(f"現在地推定: lat={current_lat:.6f}, lon={current_lon:.6f}")
+
+# OSRM（徒歩）ルート取得
+def osrm_route_foot(start_lat, start_lon, end_lat, end_lon) -> dict | None:
+    url = f"https://router.project-osrm.org/route/v1/foot/{start_lon},{start_lat};{end_lon},{end_lat}?overview=full&geometries=geojson"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if "routes" not in data or len(data["routes"]) == 0:
+            return None
+        return data["routes"][0]
+    except Exception:
+        return None
 
 # 再描画＆ルート計算
 if st.button("現在地を基準に再描画（同心円＆ルート計算）"):
@@ -260,15 +281,14 @@ if st.button("現在地を基準に再描画（同心円＆ルート計算）"):
             folium.Circle(
                 location=[current_lat, current_lon],
                 radius=r_m,
-                color=color, weight=2,
-                fill=True, fill_opacity=0.08, tooltip=label
+                color=color, weight=2, fill=True, fill_opacity=0.08, tooltip=label
             ).add_to(m2)
     else:
         st.warning("5/10/15分の到達距離が未選択のため、同心円は描画されません。")
 
+    # ルート（徒歩・OSRM優先 / 失敗時は直線距離）
     route_summaries = []
     if shelters:
-        # OSRMで徒歩ルート。失敗時は直線距離 + 徒歩 4.5km/h 換算
         scored = []
         for s in shelters:
             route = osrm_route_foot(current_lat, current_lon, s.lat, s.lon)
@@ -277,7 +297,7 @@ if st.button("現在地を基準に再描画（同心円＆ルート計算）"):
                 t_min = route["duration"] / 60.0
             else:
                 d_km = haversine_km(current_lat, current_lon, s.lat, s.lon)
-                t_min = (d_km / 4.5) * 60.0
+                t_min = (d_km / 4.5) * 60.0  # 徒歩時速4.5km仮定
                 route = None
             scored.append((s, d_km, t_min, route))
 
@@ -317,5 +337,5 @@ if st.button("現在地を基準に再描画（同心円＆ルート計算）"):
 with st.expander("補足：到達圏の見方"):
     st.markdown("""
 - 同心円は選択した **年齢区分 × 活動種別** の行から、**5/10/15分で移動できる距離（km）** を読み取り半径にしています。
-- CSVに速度の前提が含まれているため、実地の道路形状による差はあります。厳密な等時間到達圏（Isochrone）が必要なら、ORS/OSRMの等時間APIに切り替え可能です。
+- 厳密な等時間到達圏（Isochrone）が必要なら、OpenRouteService等の等時間APIへの切替も可能です。
 """)
