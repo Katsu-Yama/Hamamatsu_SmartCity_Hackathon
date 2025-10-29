@@ -209,7 +209,7 @@ except Exception as e:
 
 # 地図の作成
 st.subheader("地図（現在地の📍ボタンで位置取得 → 同心円と避難所を確認）")
-m = folium.Map(location=[default_lat, default_lon], zoom_start=12, control_scale=True)
+m = folium.Map(location=[default_lat, default_lon], zoom_start=13, control_scale=True)
 LocateControl(auto_start=False, position="topleft").add_to(m)
 
 # 同心円描画（CSVが有効な場合のみ）
@@ -266,7 +266,7 @@ def osrm_route_foot(start_lat, start_lon, end_lat, end_lon) -> dict | None:
 
 # 再描画＆ルート計算
 if st.button("現在地を基準に再描画（同心円＆ルート計算）"):
-    m2 = folium.Map(location=[current_lat, current_lon], zoom_start=12, control_scale=True)
+    m2 = folium.Map(location=[current_lat, current_lon], zoom_start=13, control_scale=True)
     LocateControl(auto_start=False, position="topleft").add_to(m2)
     # 現在地マーカー
     folium.Marker([current_lat, current_lon], tooltip="現在地", icon=folium.Icon(color="green", icon="home")).add_to(m2)
@@ -339,5 +339,6 @@ with st.expander("補足：到達圏の見方"):
 - 同心円は選択した **年齢区分 × 活動種別** の行から、**5/10/15分で移動できる距離（km）** を読み取り半径にしています。
 - 厳密な等時間到達圏（Isochrone）が必要なら、OpenRouteService等の等時間APIへの切替も可能です。
 """)
+
 
 
