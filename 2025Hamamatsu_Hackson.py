@@ -6,6 +6,7 @@ import typing as T
 from dataclasses import dataclass
 
 import pandas as pd
+import time
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
@@ -146,8 +147,50 @@ with st.sidebar:
 
     st.divider()
     st.header("現在地設定")
-    default_lat = st.number_input("緯度", value=34.706, step=0.000001, format="%.6f")
-    default_lon = st.number_input("経度", value=137.735, step=0.000001, format="%.6f")
+    if "lat_input" not in st.session_state:
+        st.session_state["lat_input"] = 34.706
+    if "lon_input" not in st.session_state:
+        st.session_state["lon_input"] = 137.735
+    default_lat = st.number_input("緯度", value=st.session_state["lat_input"], step=0.000001, format="%.6f", key="lat_input")
+    default_lon = st.number_input("経度", value=st.session_state["lon_input"], step=0.000001, format="%.6f", key="lon_input")
+
+    def set_demo_location():
+        st.session_state["lat_input"] = 34.706000
+        st.session_state["lon_input"] = 137.735000
+
+    st.button("現在地を入力する", use_container_width=True, on_click=set_demo_location)
+
+    st.divider()
+    st.header("年齢・移動手段")
+    # 年齢
+    age_selected = st.selectbox("年齢", list(pd.unique(load_csv(mobility_path)[detect_columns(load_csv(mobility_path), {
+        "age": ["年齢区分","年齢層","年齢","age"]
+    })["age"]].astype(str))) if False else None)
+    # 上の一行はダミー（動的再読込を避けるため）。実際の age_selected は下で再設定します。
+
+    # 手段選択（ピクトグラムボタン）
+    if "transport_select" not in st.session_state:
+        st.session_state["transport_select"] = None
+    st.write("移動手段")
+    t1, t2, t3 = st.columns(3)
+    current_t = st.session_state.get("transport_select")
+    with t1:
+        if st.button("🚶‍♂️\n歩く", use_container_width=True, key="btn_walk_sidebar", type=("primary" if current_t == "歩く" else "secondary")):
+            st.session_state["transport_select"] = "歩く"
+            st.session_state["act_override"] = "歩く"
+            st.rerun()
+    with t2:
+        if st.button("🏃‍♀️\n走る", use_container_width=True, key="btn_run_sidebar", type=("primary" if current_t == "走る" else "secondary")):
+            st.session_state["transport_select"] = "走る"
+            st.session_state["act_override"] = "走る"
+            st.rerun()
+    with t3:
+        if st.button("🚲\n自転車", use_container_width=True, key="btn_bike_sidebar", type=("primary" if current_t == "自転車" else "secondary")):
+            st.session_state["transport_select"] = "自転車"
+            st.session_state["act_override"] = "自転車"
+            st.rerun()
+    if current_t:
+        st.caption(f"選択中の移動手段: {current_t}")
 
 # ---- CSV読込
 mob_df = load_csv(mobility_path)
@@ -166,11 +209,46 @@ col_5 = colmap["m5"]; col_10 = colmap["m10"]; col_15 = colmap["m15"]
 
 ages = list(pd.unique(mob_df[age_col].astype(str)))
 acts = list(pd.unique(mob_df[act_col].astype(str)))
-c1, c2 = st.columns(2)
-with c1:
-    age_selected = st.selectbox("年齢区分", ages)
-with c2:
-    act_selected = st.selectbox("活動種別", acts)
+
+# サイドバー年齢を実データで再設定（上のダミー抑止）
+with st.sidebar:
+    age_selected = st.selectbox("年齢", ages, key="age_select")
+
+# サイドバーの手段ボタンからの上書きを適用
+def map_transport_to_act(label: str, available: list[str]) -> str | None:
+    if not label:
+        return None
+    cands = []
+    n = normalize_colname(label)
+    if n in ("歩く","あるく"):
+        cands = ["徒歩","歩く","walking","walk"]
+    elif n in ("走る","はしる"):
+        cands = ["走る","ラン","ランニング","run","running","jog"]
+    elif n in ("自転車","じてんしゃ"):
+        cands = ["自転車","bicycle","bike"]
+    else:
+        cands = [label]
+    norm_av = {a: normalize_colname(str(a)) for a in available}
+    for cand in cands:
+        cn = normalize_colname(cand)
+        for orig, norm in norm_av.items():
+            if cn == norm or cn in norm or norm in cn:
+                return str(orig)
+    return None
+
+act_selected = None
+if st.session_state.get("act_override"):
+    mapped = map_transport_to_act(st.session_state.get("act_override"), acts)
+    if mapped:
+        act_selected = mapped
+if not act_selected:
+    act_selected = acts[0] if acts else ""
+
+# 入力の自動補完（未選択時のデフォルト設定）
+transport_selected = st.session_state.get("transport_select")
+if not transport_selected:
+    st.session_state["transport_select"] = "歩く"
+    st.session_state["act_override"] = "歩く"
 
 dist5_km, dist10_km, dist15_km = extract_timeband_distances(
     mob_df, age_col, act_col, col_5, col_10, col_15, age_selected, act_selected
@@ -206,6 +284,62 @@ for s in shelters:
                   popup=f"<b>{s.name}</b><br>{s.address or ''}",
                   tooltip=s.name,
                   icon=folium.Icon(color="blue", icon="info-sign")).add_to(m)
+
+# 10分到達圏内の標高上位3件を抽出し、強調表示
+@st.cache_data(show_spinner=False)
+def fetch_elevations(locations: list[tuple[float, float]]) -> list[float|None]:
+    if not locations:
+        return []
+    try:
+        url = "https://api.open-elevation.com/api/v1/lookup"
+        payload = {"locations": [{"latitude": lat, "longitude": lon} for lat, lon in locations]}
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code != 200:
+            return [None]*len(locations)
+        data = r.json()
+        results = data.get("results", [])
+        out = []
+        for i in range(len(locations)):
+            h = None
+            if i < len(results):
+                h = try_float(results[i].get("elevation"))
+            out.append(h)
+        return out
+    except Exception:
+        return [None]*len(locations)
+
+center_lat, center_lon = float(default_lat), float(default_lon)
+within = []
+for s in shelters:
+    d_km = haversine_km(center_lat, center_lon, s.lat, s.lon)
+    # dist10_km が未取得または0の場合は全候補から選ぶ（フォールバック）
+    if (dist10_km is None) or (try_float(dist10_km) == 0):
+        within.append((s, d_km))
+    else:
+        if d_km <= float(dist10_km):
+            within.append((s, d_km))
+
+top3_elev = []
+if within:
+    locs = [(s.lat, s.lon) for s, _ in within]
+    hs = fetch_elevations(locs)
+    rows = []
+    for i, (s, d_km) in enumerate(within):
+        h = hs[i] if i < len(hs) else None
+        rows.append((s, d_km, h))
+    rows.sort(key=lambda x: (-x[2] if isinstance(x[2], (int, float)) else float("inf")))
+    top3_elev = rows[:3]
+    # 地図上で強調
+    for idx, (s, d_km, h) in enumerate(top3_elev, start=1):
+        folium.CircleMarker(
+            location=[s.lat, s.lon],
+            radius=8,
+            color="#e74c3c",
+            fill=True,
+            fill_color="#e74c3c",
+            fill_opacity=0.9,
+            tooltip=f"TOP{idx}: {s.name} / {('%.2f km' % d_km)} / {('%.0f m' % h if h is not None else '高さ不明')}",
+        ).add_to(m)
 
 # ==== 上位3避難ルートを描画 ====
 def draw_top3_routes(m, origin_lat, origin_lon, shelters):
@@ -252,6 +386,112 @@ route_summaries = draw_top3_routes(m, default_lat, default_lon, shelters)
 # 地図描画
 st_folium(m, height=650, width=None)
 
-if route_summaries:
-    st.subheader("最寄り3施設（徒歩・OSRM優先 / 失敗時は直線距離換算）")
-    st.dataframe(pd.DataFrame(route_summaries), use_container_width=True)
+# ==== 地図下：Top3を大きく表示して選択 → 詳細/開始 ====
+if "sim_started" not in st.session_state:
+    st.session_state["sim_started"] = False
+if "start_time" not in st.session_state:
+    st.session_state["start_time"] = None
+if "selected_top3_name" not in st.session_state:
+    st.session_state["selected_top3_name"] = None
+if "pred_seconds" not in st.session_state:
+    st.session_state["pred_seconds"] = None
+if "results" not in st.session_state:
+    st.session_state["results"] = []
+
+# 10分到達圏内 上位3（標高順）を表で表示
+if top3_elev:
+    st.subheader("到達圏内（10分） 標高上位3施設")
+    disp = []
+    for idx, (s, d_km, h) in enumerate(top3_elev, start=1):
+        disp.append({
+            "順位": idx,
+            "避難所名": s.name,
+            "距離(km)": round(d_km, 2),
+            "標高(m)": (int(round(h)) if isinstance(h, (int, float)) else None),
+            "住所": s.address,
+        })
+    st.dataframe(pd.DataFrame(disp), use_container_width=True)
+
+if top3_elev:
+    st.markdown("<div style='font-size:20px; font-weight:700; margin-top:12px;'>標高Top3 から選択</div>", unsafe_allow_html=True)
+    elev_names = [s.name for (s, _, _) in top3_elev]
+    options = []
+    for i, (s, d_km, h) in enumerate(top3_elev, start=1):
+        elev_txt = (f"{int(round(h))} m" if isinstance(h, (int, float)) else "高さ不明")
+        options.append(f"{i}. {s.name}（{d_km:.2f} km / {elev_txt}）")
+    default_idx = 0
+    if st.session_state.get("selected_top3_name") in elev_names:
+        default_idx = elev_names.index(st.session_state.get("selected_top3_name"))
+    choice = st.radio(" ", options=options, index=default_idx, label_visibility="collapsed")
+    chosen_idx = options.index(choice)
+    chosen_s, chosen_d_km, _h = top3_elev[chosen_idx]
+    st.session_state["selected_top3_name"] = chosen_s.name
+
+    # 距離・時間（OSRM優先、失敗時は直線距離÷4.5km/h）
+    route = osrm_route_foot(default_lat, default_lon, chosen_s.lat, chosen_s.lon)
+    if route and ("distance" in route) and ("duration" in route):
+        d_km = route["distance"]/1000.0
+        t_min = route["duration"]/60.0
+    else:
+        d_km = chosen_d_km
+        t_min = (d_km/4.5)*60.0
+
+    c1, c2 = st.columns(2)
+    c1.metric("距離", f"{d_km:.2f} km")
+    c2.metric("所要時間(予測)", f"{int(round(t_min))} 分")
+
+    # 操作ボタン
+    col_a, col_b = st.columns(2)
+    with col_a:
+        start_clicked = st.button("移動開始", disabled=st.session_state["sim_started"]) 
+    with col_b:
+        stop_clicked = st.button("到着（計測終了）", disabled=not st.session_state["sim_started"]) 
+
+    if start_clicked and not st.session_state["sim_started"]:
+        st.session_state["sim_started"] = True
+        st.session_state["start_time"] = time.time()
+        st.session_state["pred_seconds"] = int(round(t_min))*60
+        st.success("計測を開始しました。安全に移動してください。")
+
+    if stop_clicked and st.session_state["sim_started"]:
+        elapsed_sec = int(time.time() - (st.session_state["start_time"] or time.time()))
+        pred = st.session_state.get("pred_seconds") or 0
+        over = elapsed_sec - pred
+        name = st.session_state.get("selected_top3_name")
+        if over > 0:
+            st.error(f"到着: {elapsed_sec//60}分{elapsed_sec%60:02d}秒｜制限超過 +{over//60}分{over%60:02d}秒")
+        else:
+            st.success(f"到着: {elapsed_sec//60}分{elapsed_sec%60:02d}秒")
+        # ログ保存
+        st.session_state["results"].append({
+            "目的地": name,
+            "予想(分)": int(round(t_min)),
+            "実測(秒)": elapsed_sec,
+            "超過(秒)": over if over > 0 else 0,
+        })
+        st.session_state["sim_started"] = False
+        st.session_state["start_time"] = None
+
+    if st.session_state["sim_started"]:
+        elapsed_sec = int(time.time() - (st.session_state["start_time"] or time.time()))
+        pred = st.session_state.get("pred_seconds") or 0
+        remain = max(0, pred - elapsed_sec)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("経過", f"{elapsed_sec//60}:{elapsed_sec%60:02d}")
+        c2.metric("残り", f"{remain//60}:{remain%60:02d}")
+        c3.metric("制限", f"{pred//60}:{pred%60:02d}")
+        over = elapsed_sec - pred
+        if over > 0:
+            st.markdown(f":red[制限超過 +{over//60}分{over%60:02d}秒]")
+
+    if st.session_state.get("results"):
+        st.subheader("移動ログ")
+        df_hist = pd.DataFrame(st.session_state["results"]).copy()
+        if not df_hist.empty:
+            df_hist["実測(分)"] = (df_hist["実測(秒)"]//60).astype(int)
+            st.dataframe(df_hist, use_container_width=True)
+        # 浜松市に提供するボタン
+        if st.button("浜松市に提供する", use_container_width=True):
+            st.success("ありがとうございます！")
+else:
+    st.info("到達圏内（10分）で標高Top3を算出できませんでした。入力や到達距離をご確認ください。")
