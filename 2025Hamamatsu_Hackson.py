@@ -17,7 +17,7 @@ from folium.plugins import LocateControl
 # 設定（既定ファイル名）
 # =========================
 DEFAULT_MOBILITY_CSV = "年齢層別移動能力.csv"
-DEFAULT_SHELTER_CSV  = "避難所リスト.csv"
+DEFAULT_SHELTER_CSV  = "221309_hamamatsu_tsunami_hinan.csv"
 
 # =========================
 # ユーティリティ
@@ -35,6 +35,30 @@ def try_float(x):
     try:
         return float(x)
     except:
+        return None
+
+def parse_number_from_text(text: str) -> float | None:
+    if text is None:
+        return None
+    try:
+        # 全角・単位混在を許容して数値だけ抽出
+        s = str(text)
+        buf = []
+        dot_used = False
+        sign_used = False
+        for ch in s:
+            if ch.isdigit():
+                buf.append(ch)
+            elif ch in [".", "．", "｡"] and not dot_used:
+                buf.append("."); dot_used = True
+            elif ch in ["-", "−", "ー"] and not sign_used:
+                buf.append("-"); sign_used = True
+            else:
+                continue
+        if not buf:
+            return None
+        return float("".join(buf))
+    except Exception:
         return None
 
 def normalize_colname(name: str) -> str:
@@ -71,6 +95,9 @@ class Shelter:
     address: str
     lat: float
     lon: float
+    floors: str | None = None
+    floors_x3m: str | None = None
+    area: float | None = None
 
 @st.cache_data(show_spinner=False)
 def load_csv(path: str) -> pd.DataFrame:
@@ -97,26 +124,44 @@ def extract_timeband_distances(df: pd.DataFrame, age_col: str, act_col: str,
 
 def parse_shelters(df: pd.DataFrame) -> T.List[Shelter]:
     cols = detect_columns(df, {
-        "name": ["避難所名","名称","施設名","name","sheltername"],
-        "addr": ["住所","address"],
+        "name": ["USER_施設名称","施設名","名称","建物名","name","sheltername"],
+        "wing": ["USER_棟名","棟名"],
+        "addr": ["USER_住所","住所","address"],
         "lat":  ["緯度","latitude","lat","y"],
         "lon":  ["経度","longitude","lon","lng","x"],
+        "floors": ["階数"],
+        "floors3": ["3階×ｍ","3階×m","3階xｍ","3階x m"],
+        "area": ["USER_面積___","面積"],
     })
     if not all(k in cols for k in ["name","lat","lon"]):
         raise ValueError("避難所CSVの列名を解決できませんでした。『避難所名/名称/施設名』『緯度』『経度』が必要です。")
     name_c = cols["name"]
+    wing_c = cols.get("wing")
     addr_c = cols.get("addr")
     lat_c  = cols["lat"]
     lon_c  = cols["lon"]
+    floors_c = cols.get("floors")
+    floors3_c = cols.get("floors3")
+    area_c = cols.get("area")
     shelters = []
     for _, row in df.iterrows():
         lat = try_float(row[lat_c]); lon = try_float(row[lon_c])
         if lat is None or lon is None:
             continue
+        name_val = str(row[name_c])
+        if wing_c and str(row.get(wing_c, "")).strip():
+            name_val = f"{name_val} {str(row[wing_c]).strip()}"
+        floors_val = str(row[floors_c]) if floors_c and (row.get(floors_c) is not None) else None
+        floors3_val = str(row[floors3_c]) if floors3_c and (row.get(floors3_c) is not None) else None
+        area_val = try_float(row[area_c]) if area_c else None
         shelters.append(Shelter(
-            name=str(row[name_c]),
+            name=name_val,
             address=str(row[addr_c]) if addr_c else "",
-            lat=lat, lon=lon
+            lat=lat,
+            lon=lon,
+            floors=floors_val,
+            floors_x3m=floors3_val,
+            area=area_val
         ))
     return shelters
 
@@ -148,15 +193,16 @@ with st.sidebar:
     st.divider()
     st.header("現在地設定")
     if "lat_input" not in st.session_state:
-        st.session_state["lat_input"] = 34.706
+        st.session_state["lat_input"] = 34.685000   # 緯度（デフォルト）
     if "lon_input" not in st.session_state:
-        st.session_state["lon_input"] = 137.735
+        st.session_state["lon_input"] = 137.718987  # 経度（デフォルト）
     default_lat = st.number_input("緯度", value=st.session_state["lat_input"], step=0.000001, format="%.6f", key="lat_input")
     default_lon = st.number_input("経度", value=st.session_state["lon_input"], step=0.000001, format="%.6f", key="lon_input")
 
     def set_demo_location():
-        st.session_state["lat_input"] = 34.706000
-        st.session_state["lon_input"] = 137.735000
+        # デモ用の固定位置
+        st.session_state["lat_input"] = 34.685000
+        st.session_state["lon_input"] = 137.718987
 
     st.button("現在地を入力する", use_container_width=True, on_click=set_demo_location)
 
@@ -191,6 +237,11 @@ with st.sidebar:
             st.rerun()
     if current_t:
         st.caption(f"選択中の移動手段: {current_t}")
+    st.divider()
+    st.header("到達圏の選択")
+    if "reach_band" not in st.session_state:
+        st.session_state["reach_band"] = "10分"
+    st.session_state["reach_band"] = st.radio("到達圏", ["5分","10分","15分"], index=(1 if st.session_state["reach_band"]=="10分" else (0 if st.session_state["reach_band"]=="5分" else 2)), horizontal=True)
 
 # ---- CSV読込
 mob_df = load_csv(mobility_path)
@@ -254,6 +305,19 @@ dist5_km, dist10_km, dist15_km = extract_timeband_distances(
     mob_df, age_col, act_col, col_5, col_10, col_15, age_selected, act_selected
 )
 
+# None安全化（CSV未整合時でも地図を描画できるよう0で代替）
+dist5_km = float(dist5_km) if isinstance(dist5_km, (int, float)) and math.isfinite(dist5_km) else 0.0
+dist10_km = float(dist10_km) if isinstance(dist10_km, (int, float)) and math.isfinite(dist10_km) else 0.0
+dist15_km = float(dist15_km) if isinstance(dist15_km, (int, float)) and math.isfinite(dist15_km) else 0.0
+
+# 選択された到達圏（km）
+reach_label = st.session_state.get("reach_band", "10分")
+reach_km = dist10_km
+if reach_label == "5分":
+    reach_km = dist5_km
+elif reach_label == "15分":
+    reach_km = dist15_km
+
 # ---- 地図初期化
 m = folium.Map(location=[default_lat, default_lon], zoom_start=13, control_scale=True)
 LocateControl(auto_start=False, position="topleft",
@@ -280,12 +344,22 @@ for r_m, color, label in [
 
 # 避難所マーカー
 for s in shelters:
+    popup_html = f"<b>{s.name}</b><br>{s.address or ''}"
+    extra = []
+    if s.floors:
+        extra.append(f"階数: {s.floors}")
+    if s.floors_x3m:
+        extra.append(f"階数×3: {s.floors_x3m}")
+    if s.area is not None and isinstance(s.area, (int, float)) and math.isfinite(s.area):
+        extra.append(f"面積: {int(round(s.area))}")
+    if extra:
+        popup_html += "<br>" + " / ".join(extra)
     folium.Marker([s.lat, s.lon],
-                  popup=f"<b>{s.name}</b><br>{s.address or ''}",
+                  popup=folium.Popup(popup_html, max_width=350),
                   tooltip=s.name,
                   icon=folium.Icon(color="blue", icon="info-sign")).add_to(m)
 
-# 10分到達圏内の標高上位3件を抽出し、強調表示
+# 選択した到達圏内の標高上位3件を抽出（地図描画は先に行う）
 @st.cache_data(show_spinner=False)
 def fetch_elevations(locations: list[tuple[float, float]]) -> list[float|None]:
     if not locations:
@@ -312,11 +386,11 @@ center_lat, center_lon = float(default_lat), float(default_lon)
 within = []
 for s in shelters:
     d_km = haversine_km(center_lat, center_lon, s.lat, s.lon)
-    # dist10_km が未取得または0の場合は全候補から選ぶ（フォールバック）
-    if (dist10_km is None) or (try_float(dist10_km) == 0):
+    # reach_km が未取得または0の場合は全候補から選ぶ（フォールバック）
+    if (reach_km is None) or (try_float(reach_km) == 0):
         within.append((s, d_km))
     else:
-        if d_km <= float(dist10_km):
+        if d_km <= float(reach_km):
             within.append((s, d_km))
 
 top3_elev = []
@@ -326,11 +400,24 @@ if within:
     rows = []
     for i, (s, d_km) in enumerate(within):
         h = hs[i] if i < len(hs) else None
-        rows.append((s, d_km, h))
-    rows.sort(key=lambda x: (-x[2] if isinstance(x[2], (int, float)) else float("inf")))
+        # 最高避難地点の階高寄与 = (階数 - 1) * 3 [m]
+        floors_contrib_m = 0.0
+        floors_num = parse_number_from_text(s.floors) if s.floors is not None else None
+        if floors_num is not None:
+            floors_contrib_m = max(0.0, (floors_num - 1.0) * 3.0)
+        else:
+            # 階数×3 が与えられている場合は 3[m] を減算して近似
+            raw = parse_number_from_text(s.floors_x3m) if s.floors_x3m is not None else None
+            if raw is not None:
+                floors_contrib_m = max(0.0, raw - 3.0)
+        base_h = h if isinstance(h, (int, float)) else 0.0
+        highest = base_h + floors_contrib_m
+        rows.append((s, d_km, h, floors_contrib_m, highest))
+    # 最高避難高度で降順ソート
+    rows.sort(key=lambda x: (-x[4]))
     top3_elev = rows[:3]
     # 地図上で強調
-    for idx, (s, d_km, h) in enumerate(top3_elev, start=1):
+    for idx, (s, d_km, h, floors3_m, highest) in enumerate(top3_elev, start=1):
         folium.CircleMarker(
             location=[s.lat, s.lon],
             radius=8,
@@ -338,52 +425,20 @@ if within:
             fill=True,
             fill_color="#e74c3c",
             fill_opacity=0.9,
-            tooltip=f"TOP{idx}: {s.name} / {('%.2f km' % d_km)} / {('%.0f m' % h if h is not None else '高さ不明')}",
+            tooltip=f"TOP{idx}: {s.name} / {('%.2f km' % d_km)} / 最高避難高度 {int(round(highest))} m",
         ).add_to(m)
-
-# ==== 上位3避難ルートを描画 ====
-def draw_top3_routes(m, origin_lat, origin_lon, shelters):
-    scored = []
-    for s in shelters:
-        route = osrm_route_foot(origin_lat, origin_lon, s.lat, s.lon)
-        if route and ("distance" in route) and ("duration" in route):
-            d_km = route["distance"]/1000.0
-            t_min = route["duration"]/60.0
-        else:
-            d_km = haversine_km(origin_lat, origin_lon, s.lat, s.lon)
-            t_min = (d_km/4.5)*60.0
-            route = None
-        scored.append((s, d_km, t_min, route))
-
-    scored.sort(key=lambda x: x[1])
-    top3 = scored[:3]
-
-    colors = ["#0074D9", "#7FDBFF", "#001f3f"]
-    summaries = []
-    for i, (s, d_km, t_min, route) in enumerate(top3, start=1):
-        color = colors[i-1]
-        if route and "geometry" in route and route["geometry"].get("coordinates"):
-            coords = route["geometry"]["coordinates"]
-            latlngs = [[lat, lon] for lon, lat in coords]
-            folium.PolyLine(latlngs, color=color, weight=5, opacity=0.8).add_to(m)
-        else:
-            folium.PolyLine([[origin_lat, origin_lon], [s.lat, s.lon]],
-                            color=color, weight=3, opacity=0.6, dash_array="5,10").add_to(m)
+        # 大きな順位ラベルを重ねて表示
         folium.Marker(
             [s.lat, s.lon],
-            tooltip=f"{i}. {s.name}",
-            popup=folium.Popup(
-                f"<b>{i}. {s.name}</b><br>距離: {d_km:.2f} km<br>所要: {t_min:.0f} 分",
-                max_width=250
-            ),
-            icon=folium.DivIcon(html=f"<div style='background:{color};color:white;border-radius:12px;padding:2px 6px;font-weight:bold'>{i}</div>")
+            icon=folium.DivIcon(html=(
+                f"<div style=\"font-size:24px;font-weight:900;color:#e74c3c;"
+                f"background:rgba(255,255,255,0.85);border:2px solid #e74c3c;"
+                f"border-radius:14px;padding:2px 8px;line-height:1;\">{idx}</div>"
+            )),
+            tooltip=f"順位 {idx}"
         ).add_to(m)
-        summaries.append({"順": i, "避難所名": s.name, "距離(km)": round(d_km,2), "所要時間(分)": int(round(t_min))})
-    return summaries
 
-route_summaries = draw_top3_routes(m, default_lat, default_lon, shelters)
-
-# 地図描画
+# 地図描画（先に描画してブロッキングを避ける）
 st_folium(m, height=650, width=None)
 
 # ==== 地図下：Top3を大きく表示して選択 → 詳細/開始 ====
@@ -400,31 +455,32 @@ if "results" not in st.session_state:
 
 # 10分到達圏内 上位3（標高順）を表で表示
 if top3_elev:
-    st.subheader("到達圏内（10分） 標高上位3施設")
+    st.subheader(f"到達圏内（{reach_label}） 最高避難高度 上位3施設")
     disp = []
-    for idx, (s, d_km, h) in enumerate(top3_elev, start=1):
+    for idx, (s, d_km, h, floors3_m, highest) in enumerate(top3_elev, start=1):
         disp.append({
             "順位": idx,
             "避難所名": s.name,
             "距離(km)": round(d_km, 2),
             "標高(m)": (int(round(h)) if isinstance(h, (int, float)) else None),
+            "階数×3(m)": int(round(floors3_m)) if isinstance(floors3_m, (int, float)) else None,
+            "最高避難高度(m)": int(round(highest)),
             "住所": s.address,
         })
     st.dataframe(pd.DataFrame(disp), use_container_width=True)
 
 if top3_elev:
-    st.markdown("<div style='font-size:20px; font-weight:700; margin-top:12px;'>標高Top3 から選択</div>", unsafe_allow_html=True)
-    elev_names = [s.name for (s, _, _) in top3_elev]
+    st.markdown(f"<div style='font-size:20px; font-weight:700; margin-top:12px;'>最高避難高度Top3（{reach_label}圏内）から選択</div>", unsafe_allow_html=True)
+    elev_names = [s.name for (s, _, _, _, _) in top3_elev]
     options = []
-    for i, (s, d_km, h) in enumerate(top3_elev, start=1):
-        elev_txt = (f"{int(round(h))} m" if isinstance(h, (int, float)) else "高さ不明")
-        options.append(f"{i}. {s.name}（{d_km:.2f} km / {elev_txt}）")
+    for i, (s, d_km, h, floors3_m, highest) in enumerate(top3_elev, start=1):
+        options.append(f"{i}. {s.name}（{d_km:.2f} km / 最高避難高度 {int(round(highest))} m）")
     default_idx = 0
     if st.session_state.get("selected_top3_name") in elev_names:
         default_idx = elev_names.index(st.session_state.get("selected_top3_name"))
     choice = st.radio(" ", options=options, index=default_idx, label_visibility="collapsed")
     chosen_idx = options.index(choice)
-    chosen_s, chosen_d_km, _h = top3_elev[chosen_idx]
+    chosen_s, chosen_d_km, _h, _f3, _hi = top3_elev[chosen_idx]
     st.session_state["selected_top3_name"] = chosen_s.name
 
     # 距離・時間（OSRM優先、失敗時は直線距離÷4.5km/h）
