@@ -191,22 +191,6 @@ with st.sidebar:
     st.caption("※ 同じフォルダに配置してください。")
 
     st.divider()
-    st.header("現在地設定")
-    if "lat_input" not in st.session_state:
-        st.session_state["lat_input"] = 34.685000   # 緯度（デフォルト）
-    if "lon_input" not in st.session_state:
-        st.session_state["lon_input"] = 137.718987  # 経度（デフォルト）
-    default_lat = st.number_input("緯度", value=st.session_state["lat_input"], step=0.000001, format="%.6f", key="lat_input")
-    default_lon = st.number_input("経度", value=st.session_state["lon_input"], step=0.000001, format="%.6f", key="lon_input")
-
-    def set_demo_location():
-        # デモ用の固定位置
-        st.session_state["lat_input"] = 34.685000
-        st.session_state["lon_input"] = 137.718987
-
-    st.button("現在地を入力する", use_container_width=True, on_click=set_demo_location)
-
-    st.divider()
     st.header("年齢・移動手段")
     # 年齢
     age_selected = st.selectbox("年齢", list(pd.unique(load_csv(mobility_path)[detect_columns(load_csv(mobility_path), {
@@ -242,6 +226,22 @@ with st.sidebar:
     if "reach_band" not in st.session_state:
         st.session_state["reach_band"] = "10分"
     st.session_state["reach_band"] = st.radio("到達圏", ["5分","10分","15分"], index=(1 if st.session_state["reach_band"]=="10分" else (0 if st.session_state["reach_band"]=="5分" else 2)), horizontal=True)
+
+    st.divider()
+    st.header("現在地設定")
+    if "lat_input" not in st.session_state:
+        st.session_state["lat_input"] = 34.685000   # 緯度（デフォルト）
+    if "lon_input" not in st.session_state:
+        st.session_state["lon_input"] = 137.718987  # 経度（デフォルト）
+    default_lat = st.number_input("緯度", value=st.session_state["lat_input"], step=0.000001, format="%.6f", key="lat_input")
+    default_lon = st.number_input("経度", value=st.session_state["lon_input"], step=0.000001, format="%.6f", key="lon_input")
+
+    def set_demo_location():
+        # デモ用の固定位置
+        st.session_state["lat_input"] = 34.685000
+        st.session_state["lon_input"] = 137.718987
+
+    st.button("現在地を入力する", use_container_width=True, on_click=set_demo_location)
 
 # ---- CSV読込
 mob_df = load_csv(mobility_path)

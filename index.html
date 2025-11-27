@@ -43,11 +43,47 @@
         <input id="lat" placeholder="緯度" />
         <input id="lon" placeholder="経度" />
       </div>
+      <div class="row field" style="margin-top:4px; font-size:13px;">
+        <span>住所から設定：</span>
+        <input id="addressInput" placeholder="例）静岡県浜松市中区元城町103-2 など" />
+        <button class="btn secondary" id="geocodeBtn" style="white-space:nowrap;">住所→現在地</button>
+      </div>
       <div class="row field">
         <span>避難所：</span>
         <input id="shelterName" placeholder="名称" value="浜松市役所（例）" />
         <input id="shelterLat" placeholder="緯度" value="34.710" />
         <input id="shelterLon" placeholder="経度" value="137.727" />
+      </div>
+      <div class="card" style="margin-top:8px;">
+        <div style="font-weight:700; margin-bottom:4px;">🧮 簡易「到達範囲」シミュレータ</div>
+        <div class="row field">
+          <span>年齢：</span>
+          <input id="ageInput" type="number" min="5" max="110" placeholder="例）40" style="max-width:90px;" />
+          <button class="btn gray" id="ageToSpeedBtn" style="white-space:nowrap;">厚労省データから初期値</button>
+        </div>
+        <div class="row field">
+          <span>歩行速度(推定)：</span>
+          <input id="speedInput" type="number" min="0.2" max="3.0" step="0.1" placeholder="m/秒" />
+          <span style="font-size:12px; opacity:0.85;">※ログから自動補正</span>
+        </div>
+        <div class="row field">
+          <span>避難に使える時間：</span>
+          <input id="timeMinutesInput" type="number" min="1" max="180" value="30" style="max-width:90px;" />
+          <span>分</span>
+          <button class="btn" id="reachAreaBtn" style="white-space:nowrap;">到達できる範囲を円で表示</button>
+        </div>
+        <div style="margin-top:4px; font-size:12px; opacity:0.9;">
+          ◎ 日常の運動や避難トレーニングのログから、あなた個人の移動能力に近づけます（端末内のみ保存）。
+        </div>
+        <div class="row field" style="margin-top:4px; font-size:12px;">
+          <span>今回のログ：</span>
+          <input id="logDistanceInput" type="number" min="10" step="10" placeholder="移動距離 m" style="max-width:110px;" />
+          <input id="logTimeInput" type="number" min="0.5" step="0.5" placeholder="所要時間 分" style="max-width:110px;" />
+          <button class="btn secondary" id="addLogBtn" style="white-space:nowrap;">ログとして記録</button>
+        </div>
+        <div id="logSummary" style="margin-top:4px; font-size:12px; opacity:0.9;">
+          ログ：まだ記録がありません。
+        </div>
       </div>
       <div class="row field">
         <span>ORS API Key：</span>
@@ -110,12 +146,27 @@
     const mapDiv = document.getElementById('map');
     const staticMapImg = document.getElementById('staticMap');
     const arContainer = document.getElementById('arContainer');
+    // 簡易シミュレータ関連
+    const addressInputEl = document.getElementById('addressInput');
+    const geocodeBtn = document.getElementById('geocodeBtn');
+    const ageInputEl = document.getElementById('ageInput');
+    const ageToSpeedBtn = document.getElementById('ageToSpeedBtn');
+    const speedInputEl = document.getElementById('speedInput');
+    const timeMinutesInputEl = document.getElementById('timeMinutesInput');
+    const reachAreaBtn = document.getElementById('reachAreaBtn');
+    const logDistanceInputEl = document.getElementById('logDistanceInput');
+    const logTimeInputEl = document.getElementById('logTimeInput');
+    const addLogBtn = document.getElementById('addLogBtn');
+    const logSummaryEl = document.getElementById('logSummary');
 
-    let map, routeLayer, markersLayer;
+    let map, routeLayer, markersLayer, reachCircleLayer;
+    let shelters = [];
+    let sheltersLoaded = false;
     let routeCoords = [];
     let manualMode = false;
     const wpEveryMeters = 100; // 100m
     let arReady = false;
+    const LOG_STORAGE_KEY = 'evac_sim_walk_logs_v1';
 
     // ====== 位置情報（無応答対策付き） ======
     let geoResponded = false;
@@ -140,11 +191,150 @@
     function onManualInput(){ const la=parseFloat(latEl.value), lo=parseFloat(lonEl.value); if(isValidLatLon(la,lo)){ manualMode=true; statusEl.innerText = `🖊️ 手入力の現在地を使用中: ${la.toFixed(6)}, ${lo.toFixed(6)}`; } }
     latEl.addEventListener('input', onManualInput); lonEl.addEventListener('input', onManualInput);
 
+    // ====== 簡易シミュレータ：初期化 ======
+    initWalkLogsFromStorage();
+    if (!speedInputEl.value) {
+      // デフォルト 1.0 m/s（高齢者も想定した控えめ値）
+      speedInputEl.value = '1.0';
+    }
+
     // ====== UI操作 ======
     mapOnlyBtn.addEventListener('click', showMapOnly);
     manualBtn.addEventListener('click', ()=>{ manualMode = true; const la = parseFloat(latEl.value)||34.705; const lo = parseFloat(lonEl.value)||137.730; statusEl.textContent = `🖊️ 手入力の現在地を使用中: ${la.toFixed(6)}, ${lo.toFixed(6)}`; });
     toggleMapBtn.addEventListener('click', showMapOnly);
     toggleArBtn.addEventListener('click', startAR);
+
+    // 住所→現在地
+    geocodeBtn.addEventListener('click', async () => {
+      const addr = (addressInputEl.value || '').trim();
+      if (!addr) { alert('住所を入力してください。'); return; }
+      try {
+        statusEl.textContent = '🔍 住所から位置を検索中…';
+        const { lat, lon } = await geocodeAddress(addr);
+        latEl.value = lat.toFixed(6);
+        lonEl.value = lon.toFixed(6);
+        manualMode = true;
+        statusEl.textContent = `📍 住所から現在地を設定: ${latEl.value}, ${lonEl.value}`;
+        showMapOnly();
+        // 地図があれば中心移動
+        if (await ensureLeaflet()) {
+          if (!map) {
+            map = L.map('map');
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+            routeLayer = L.polyline([], {color:'green', weight:5}).addTo(map);
+            markersLayer = L.layerGroup().addTo(map);
+          }
+          map.setView([lat, lon], 15);
+          markersLayer.clearLayers();
+          L.marker([lat, lon]).addTo(markersLayer).bindPopup('現在地（住所から設定）').openPopup();
+        }
+      } catch (e) {
+        alert('住所から位置を取得できませんでした。入力内容やネットワークをご確認ください。');
+        statusEl.textContent = '⚠️ 住所検索に失敗しました。';
+        logDiag('geocode error: ' + (e.message || e));
+      }
+    });
+
+    // 年齢→歩行速度初期値
+    ageToSpeedBtn.addEventListener('click', () => {
+      const age = parseFloat(ageInputEl.value);
+      if (!isFinite(age)) { alert('年齢を入力してください。'); return; }
+      const base = estimateSpeedFromAge(age);
+      speedInputEl.value = base.toFixed(1);
+      statusEl.textContent = `🏃‍♀️ 年齢から推定した平均歩行速度を設定しました（約 ${base.toFixed(1)} m/秒）`;
+      // ログがあれば、自動で個人補正
+      applyLogsToSpeed();
+    });
+
+    // 到達範囲円の描画
+    reachAreaBtn.addEventListener('click', async () => {
+      const lat = parseFloat(latEl.value);
+      const lon = parseFloat(lonEl.value);
+      if (!isValidLatLon(lat, lon)) {
+        alert('現在地（緯度・経度）を先に設定してください。');
+        return;
+      }
+      const v = parseFloat(speedInputEl.value);
+      const tMin = parseFloat(timeMinutesInputEl.value);
+      if (!isFinite(v) || v <= 0) { alert('歩行速度(m/秒)を入力してください。'); return; }
+      if (!isFinite(tMin) || tMin <= 0) { alert('避難に使える時間(分)を入力してください。'); return; }
+      const radius = v * tMin * 60; // m
+
+      statusEl.textContent = `🧮 到達範囲を計算中…（半径 約 ${(radius/1000).toFixed(2)} km）`;
+      showMapOnly();
+      // 避難所リストを事前ロード
+      await ensureSheltersLoaded();
+      if (!(await ensureLeaflet())) {
+        // Leafletが使えない場合は静的マップで近似
+        const center = {lat, lon};
+        const url = `https://staticmap.openstreetmap.de/staticmap.php?center=${center.lat},${center.lon}&zoom=14&size=800x600&markers=${center.lat},${center.lon},lightblue1`;
+        staticMapImg.src = url;
+        staticMapImg.style.display='block';
+        mapDiv.style.display='none';
+        logDiag('Leaflet未利用：到達範囲は概念的な静的マップ表示のみ');
+        return;
+      }
+
+      if (!map) {
+        map = L.map('map');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+        routeLayer = L.polyline([], {color:'green', weight:5}).addTo(map);
+        markersLayer = L.layerGroup().addTo(map);
+      }
+      markersLayer.clearLayers();
+      if (reachCircleLayer) {
+        reachCircleLayer.remove();
+      }
+      L.marker([lat, lon]).addTo(markersLayer).bindPopup('スタート地点').openPopup();
+      reachCircleLayer = L.circle([lat, lon], {
+        radius,
+        color: '#ffa500',
+        weight: 2,
+        fillColor: '#ffa500',
+        fillOpacity: 0.15
+      }).addTo(map);
+      // 到達可能な避難所を抽出
+      const reachable = findReachableShelters({lat, lon}, radius);
+      let bestText = '円の中に登録された避難所はありません。';
+      if (reachable.length) {
+        // 標高が最も高いものを「正解」とする
+        reachable.sort((a,b)=>b.elev - a.elev);
+        const best = reachable[0];
+        bestText = `この条件なら「${best.name}」が最も高い避難先です（標高 ${best.elev.toFixed(1)} m / 距離 約 ${(best.dist/1000).toFixed(2)} km）。`;
+        // マーカー描画
+        reachable.forEach((s,i)=>{
+          const isBest = (i===0);
+          const marker = L.marker([s.lat, s.lon], { title: s.name });
+          marker.addTo(markersLayer).bindPopup(
+            `${isBest ? '⭐ 最優先候補：' : ''}${s.name}<br>` +
+            `標高：${s.elev.toFixed(1)} m<br>` +
+            `距離：約 ${(s.dist/1000).toFixed(2)} km`
+          );
+          if (isBest) {
+            marker.openPopup();
+          }
+        });
+      }
+
+      map.fitBounds(reachCircleLayer.getBounds(), { padding:[40,40] });
+      statusEl.textContent = `✅ 半径 約 ${(radius/1000).toFixed(2)} km の範囲を表示しました（徒歩 ${tMin} 分・速度 ${v.toFixed(1)} m/秒 想定）。${bestText}`;
+    });
+
+    // ログ追加
+    addLogBtn.addEventListener('click', () => {
+      const dist = parseFloat(logDistanceInputEl.value);
+      const tMin = parseFloat(logTimeInputEl.value);
+      if (!isFinite(dist) || dist <= 0 || !isFinite(tMin) || tMin <= 0) {
+        alert('移動距離(m)と所要時間(分)を正しく入力してください。');
+        return;
+      }
+      const v = dist / (tMin * 60); // m/s
+      appendWalkLog({ distance_m: dist, time_min: tMin, speed_ms: v, ts: Date.now() });
+      logDistanceInputEl.value = '';
+      logTimeInputEl.value = '';
+      statusEl.textContent = `📘 ログを追加しました（今回の平均速度 約 ${v.toFixed(2)} m/秒）`;
+      applyLogsToSpeed();
+    });
 
     // iOS向け：モーションアクセス許可
     async function requestIOSMotion(){
@@ -373,6 +563,140 @@
     function sampleByDistance(coords, step){ const out=[coords[0]]; let acc=0; for(let i=1;i<coords.length;i++){ const d=haversine(coords[i-1], coords[i]); acc+=d; if(acc>=step){ out.push(coords[i]); acc=0; } } return out; }
     function nearestWaypoint(lat, lon){ const cam={lat, lon}; const els=[...document.querySelectorAll('#waypoints a-image')]; if(!els || !els.length) return null; let best=null; els.forEach(el=>{ if(!el) return; const attr = el.getAttribute('gps-entity-place'); if(!attr) return; const m = /latitude:\s*([\d\.-]+);\s*longitude:\s*([\d\.-]+)/.exec(attr); if(!m) return; const p={lat: parseFloat(m[1]), lon: parseFloat(m[2])}; const dist = haversine(cam, p); const name = el.getAttribute('title') || 'チェックポイント'; if(!best || dist<best.dist) best={name, dist}; }); return best; }
     function decodePolyline(str, precision=1e-5){ if (!str || typeof str !== 'string') return null; let index = 0, lat = 0, lon = 0, coords = []; const len = str.length; while (index < len) { let b, shift = 0, result = 0; do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20); const dlat = ((result & 1) ? ~(result >> 1) : (result >> 1)); lat += dlat; shift = 0; result = 0; do { b = str.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20); const dlon = ((result & 1) ? ~(result >> 1) : (result >> 1)); lon += dlon; coords.push({ lat: lat * precision, lon: lon * precision }); } return coords; }
+
+    // 避難所リストのロード
+    async function ensureSheltersLoaded(){
+      if (sheltersLoaded) return;
+      try{
+        const res = await fetch('避難所リスト.csv');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const lines = text.trim().split(/\r?\n/);
+        // 1行目はヘッダ
+        shelters = [];
+        for (let i=1; i<lines.length; i++){
+          const cols = lines[i].split(',');
+          if (cols.length < 5) continue;
+          const name = cols[0].trim();
+          const lat = parseFloat(cols[2]);
+          const lon = parseFloat(cols[3]);
+          const elev = parseFloat(cols[4]);
+          if (!isValidLatLon(lat, lon) || !isFinite(elev)) continue;
+          shelters.push({ name, lat, lon, elev });
+        }
+        sheltersLoaded = true;
+        logDiag(`避難所データ読み込み：${shelters.length} 件`);
+      }catch(e){
+        logDiag('避難所CSVロード失敗: ' + (e.message||e));
+        sheltersLoaded = true;
+      }
+    }
+
+    function findReachableShelters(origin, radius){
+      if (!shelters || !shelters.length) return [];
+      const out = [];
+      shelters.forEach(s => {
+        const d = haversine(origin, {lat:s.lat, lon:s.lon});
+        if (d <= radius){
+          out.push({ ...s, dist: d });
+        }
+      });
+      return out;
+    }
+
+    // 簡易シミュレータ用：年齢→平均歩行速度（年齢層別移動能力CSVを元にした目安）
+    function estimateSpeedFromAge(age){
+      // 20-29: 10分で0.9km → 0.9*1000 / 600 ≒ 1.5 m/s
+      // 30-39: 0.87km → ≒ 1.45 m/s
+      // 40-49: 0.84km → ≒ 1.40 m/s
+      // 50-59: 0.81km → ≒ 1.35 m/s
+      // 60-69: 0.78km → ≒ 1.30 m/s
+      // 70-79: 0.72km → ≒ 1.20 m/s
+      // 80+:   0.66km → ≒ 1.10 m/s
+      if (age < 20) return 1.45;      // 高校生〜若年
+      if (age < 30) return 1.50;
+      if (age < 40) return 1.45;
+      if (age < 50) return 1.40;
+      if (age < 60) return 1.35;
+      if (age < 70) return 1.30;
+      if (age < 80) return 1.20;
+      return 1.10;
+    }
+
+    // 住所→緯度経度（Nominatim を利用）
+    async function geocodeAddress(address){
+      const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=jp&q=${encodeURIComponent(address)}`;
+      const res = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'evac-training-simulator/1.0'
+        }
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const arr = await res.json();
+      if (!arr || !arr.length) throw new Error('no result');
+      return { lat: parseFloat(arr[0].lat), lon: parseFloat(arr[0].lon) };
+    }
+
+    // 個人ログの保存・読込
+    function initWalkLogsFromStorage(){
+      try{
+        const raw = localStorage.getItem(LOG_STORAGE_KEY);
+        if (!raw) { logSummaryEl.textContent = 'ログ：まだ記録がありません。'; return; }
+        const logs = JSON.parse(raw);
+        updateLogSummary(logs);
+      }catch(e){
+        logDiag('walk log load error: ' + (e.message||e));
+      }
+    }
+
+    function appendWalkLog(entry){
+      try{
+        const raw = localStorage.getItem(LOG_STORAGE_KEY);
+        const logs = raw ? JSON.parse(raw) : [];
+        logs.push(entry);
+        localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(logs));
+        updateLogSummary(logs);
+      }catch(e){
+        logDiag('walk log save error: ' + (e.message||e));
+      }
+    }
+
+    function updateLogSummary(logs){
+      if (!logs || !logs.length){
+        logSummaryEl.textContent = 'ログ：まだ記録がありません。';
+        return;
+      }
+      const n = logs.length;
+      let sumSpeed = 0, sumDist = 0, sumTime = 0;
+      logs.forEach(l => {
+        sumSpeed += l.speed_ms || 0;
+        sumDist += l.distance_m || 0;
+        sumTime += l.time_min || 0;
+      });
+      const avgSpeed = sumSpeed / n;
+      logSummaryEl.textContent = `ログ件数：${n} 件 / 平均速度 約 ${avgSpeed.toFixed(2)} m/秒 / 合計距離 約 ${sumDist.toFixed(0)} m`;
+    }
+
+    // ログの情報を現在の速度入力に反映（初期値との折衷）
+    function applyLogsToSpeed(){
+      try{
+        const raw = localStorage.getItem(LOG_STORAGE_KEY);
+        if (!raw) return;
+        const logs = JSON.parse(raw);
+        if (!logs.length) return;
+        let sum = 0;
+        logs.forEach(l => { sum += l.speed_ms || 0; });
+        const avg = sum / logs.length;
+        const cur = parseFloat(speedInputEl.value) || 1.0;
+        // 現在値とログ平均を 50:50 でミックスして、急な変化を避ける
+        const mixed = (cur + avg) / 2;
+        speedInputEl.value = mixed.toFixed(2);
+        updateLogSummary(logs);
+      }catch(e){
+        logDiag('applyLogsToSpeed error: ' + (e.message||e));
+      }
+    }
 
     function placeWaypoints(coords, shelterName){
       const container = document.querySelector('#arContainer #waypoints');
